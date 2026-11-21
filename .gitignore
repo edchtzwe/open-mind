@@ -7,3 +7,6 @@ config.toml
 dist/
 build/
 .fastembed_cache/
+
+# runtime
+*.log

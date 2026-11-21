@@ -7,6 +7,8 @@ enabling RBAC later means filling this one class in, nothing else changes.
 
 from __future__ import annotations
 
+import socket
+
 import uvicorn
 from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
@@ -86,9 +88,10 @@ def _security_settings(host: str, port: int) -> TransportSecuritySettings:
         f"127.0.0.1:{port}",
         f"[::1]:{port}",
     }
-    # Binding 0.0.0.0: clients reach us by our real IPs — allow them too,
-    # or the DNS-rebinding guard 421s every request from outside localhost.
-    import socket
+    # Binding 0.0.0.0: peers reach us by the handles the network gave us —
+    # this container's hostname (podman network DNS) and its real IPs.
+    # Without them the DNS-rebinding guard 421s every non-loopback request.
+    allowed.add(f"{socket.gethostname()}:{port}")
 
     for info in socket.getaddrinfo(socket.gethostname(), port, socket.AF_INET):
         allowed.add(f"{info[4][0]}:{port}")

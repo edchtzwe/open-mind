@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import uvicorn
 from mcp.server import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
@@ -76,9 +77,38 @@ class AccessControl(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+def _security_settings(host: str, port: int) -> TransportSecuritySettings:
+    """Allow the configured bind host plus common local names — otherwise the
+    SDK's DNS-rebinding protection answers 421 to every off-localhost call."""
+    allowed = {
+        f"{host}:{port}",
+        f"localhost:{port}",
+        f"127.0.0.1:{port}",
+        f"[::1]:{port}",
+    }
+    # Binding 0.0.0.0: clients reach us by our real IPs — allow them too,
+    # or the DNS-rebinding guard 421s every request from outside localhost.
+    import socket
+
+    for info in socket.getaddrinfo(socket.gethostname(), port, socket.AF_INET):
+        allowed.add(f"{info[4][0]}:{port}")
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=sorted(allowed),
+        allowed_origins=sorted(
+            f"http://{h}:{port}" for h in (host, "localhost", "127.0.0.1")
+        ),
+    )
+
+
 def create_app():
     """The Starlette app: SDK streamable-HTTP endpoint behind the HTTP gate."""
-    app = mcp.streamable_http_app(streamable_http_path="/mcp")
+    host = get("server", "host") or "127.0.0.1"
+    port = get("server", "port") or 8765
+    app = mcp.streamable_http_app(
+        streamable_http_path="/mcp",
+        transport_security=_security_settings(host, port),
+    )
     app.add_middleware(AccessControl)
     return app
 

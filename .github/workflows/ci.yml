@@ -1,0 +1,51 @@
+name: ci
+
+# Not on every push. The full suite runs once, at the merge attempt, against
+# the merged result — a merge group is the batch of pull requests being landed
+# together, so N pull requests cost one run, not N.
+#
+# pull_request is present only so the required check reports on the pull
+# request; it does a syntax check and nothing else. That keeps queue entry
+# cheap and puts the real gate where it blocks: on the merge group.
+on:
+  pull_request:
+  merge_group:
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    # The name branch protection requires. Renaming it breaks the gate.
+    name: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # PR stage: seconds, no dependencies installed.
+      - name: Syntax check
+        if: github.event_name == 'pull_request'
+        run: python -m compileall -q src tests
+
+      # Merge stage: the one real run.
+      # --no-deps because the suite imports only the standard library; drop it
+      # the moment a test imports mcp, fastembed or uvicorn.
+      - name: Install
+        if: github.event_name == 'merge_group'
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-deps -e .
+          pip install pytest
+
+      - name: Tests
+        if: github.event_name == 'merge_group'
+        run: python -m pytest -q

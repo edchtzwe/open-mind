@@ -10,3 +10,8 @@ build/
 
 # runtime
 *.log
+
+# test stores — the fixture deletes these, and WAL leaves journals beside them
+*.db
+*.db-wal
+*.db-shm

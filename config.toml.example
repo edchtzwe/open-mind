@@ -1,0 +1,10 @@
+# open-mind configuration — copy to config.toml and edit.
+# Reloaded automatically when modified (re-checked on every tool call).
+
+[embedding]
+model = "BAAI/bge-small-en-v1.5"
+cache_path = ".fastembed_cache"
+
+[server]
+host = "127.0.0.1"
+port = 8765

@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+config.toml
+*.egg-info/
+dist/
+build/
+.fastembed_cache/
+
+# runtime
+*.log
+
+# test stores — the fixture deletes these, and WAL leaves journals beside them
+*.db
+*.db-wal
+*.db-shm

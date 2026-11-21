@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "open-mind"
+version = "0.1.0"
+description = "Plug-and-play knowledge store for agents — SQLite, MCP, semantic search"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=2.3.0",
+    "fastembed",
+    "uvicorn>=0.31",
+]
+
+[project.scripts]
+open-mind = "openmind.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openmind"]

@@ -14,6 +14,7 @@ import asyncio
 import logging
 import re
 import sqlite3
+import unicodedata
 import uuid
 from typing import Any
 
@@ -82,6 +83,103 @@ class WriteFailed(Exception):
         super().__init__(f"write failed after {attempts} attempt(s): " + "; ".join(errors))
 
 
+# --- wiki creation --------------------------------------------------------
+
+
+def validate_wiki_name(value: Any, field: str = "name") -> str:
+    """Normalise the name; casing is preserved exactly as given.
+
+    NFKC + trim fix the invisible variants (combining marks, stray spaces);
+    control characters are rejected outright. Matching elsewhere is
+    `COLLATE NOCASE`, so `Open-Mind` and `open-mind` cannot coexist.
+    """
+    name = unicodedata.normalize("NFKC", _text(value, field))
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in name):
+        raise WriteRejected(field, "must not contain control characters")
+    return name
+
+
+def _duplicate_wiki(conn: sqlite3.Connection, name: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM wiki WHERE name = :name COLLATE NOCASE LIMIT 1",
+            {"name": name},
+        ).fetchone()
+        is not None
+    )
+
+
+def _commit_wiki(name: str) -> dict[str, Any]:
+    """One attempt: one wiki row plus one root log entry. Caller owns retries."""
+    conn = db.connect()
+    conn.isolation_level = None  # explicit BEGIN IMMEDIATE, explicit COMMIT
+    try:
+        db.bootstrap(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        now = db.utcnow()
+        if _duplicate_wiki(conn, name):
+            raise WriteRejected("name", f"a live wiki named {name!r} already exists")
+        wiki_id = _insert_wiki_row(conn, name, now)
+        log_id = _root_log(conn, now)
+        log_position = _append_log(conn, log_id, f"Created wiki {name!r}.", now)
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+    return {
+        "wiki": name,
+        "wiki_id": wiki_id,
+        "log_document_id": log_id,
+        "log_position": log_position,
+    }
+
+
+async def create_wiki(request: Any, *, write_id: str | None = None) -> dict[str, Any]:
+    """Validate once, then commit one wiki plus its root log entry, retried
+    only when transient. Raises on failure."""
+    name = validate_wiki_name(request)
+    write_id = write_id or uuid.uuid4().hex[:12]
+    attempts = _attempts()
+    errors: list[str] = []
+
+    for attempt in range(1, attempts + 1):
+        try:
+            result = _commit_wiki(name)
+            result["write_id"] = write_id
+            result["attempts"] = attempt
+            telemetry.log_event(
+                "create_wiki.committed",
+                write_id=write_id,
+                tool="create_wiki",
+                wiki=name,
+                attempt=attempt,
+            )
+            return result
+        except WriteRejected:
+            raise
+        except Exception as exc:  # noqa: BLE001 — classified below
+            errors.append(f"attempt {attempt}: {type(exc).__name__}: {exc}")
+            transient = _is_transient(exc)
+            telemetry.log_event(
+                "create_wiki.retry" if transient and attempt < attempts else "create_wiki.failed",
+                level=logging.WARNING,
+                write_id=write_id,
+                tool="create_wiki",
+                wiki=name,
+                attempt=attempt,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+            if not transient or attempt == attempts:
+                raise WriteFailed(attempt, errors) from exc
+            await asyncio.sleep(_backoff())
+    raise WriteFailed(attempts, errors)  # unreachable; keeps the type honest
+
+
 # --- boundary validation ---------------------------------------------------
 
 
@@ -138,12 +236,38 @@ def _references(value: Any) -> list[dict[str, str]]:
     return out
 
 
+def _wiki_spec(value: Any) -> dict[str, Any]:
+    """A wiki is a name string, or {"id", "title"}.
+
+    A string resolves by name (case-insensitive, must exist). In the object
+    form, `id: null` plus a title means "create this wiki inside the same
+    transaction"; a supplied id must resolve to a live wiki or the write dies.
+    """
+    if isinstance(value, str):
+        return {"id": None, "title": validate_wiki_name(value, "wiki"), "create": False}
+    if not isinstance(value, dict):
+        raise WriteRejected("wiki", "must be a name string or an {id, title} object")
+    wiki_id = value.get("id")
+    if wiki_id is not None and (
+        not isinstance(wiki_id, int) or isinstance(wiki_id, bool) or wiki_id < 1
+    ):
+        raise WriteRejected("wiki.id", "must be null or a positive integer")
+    title = value.get("title")
+    if title is not None:
+        title = validate_wiki_name(title, "wiki.title")
+    if wiki_id is None and title is None:
+        raise WriteRejected("wiki", "give wiki.id for an existing wiki, or wiki.title to create one")
+    if wiki_id is not None and title is None:
+        raise WriteRejected("wiki.title", "a wiki id must come with the title it was created with")
+    return {"id": wiki_id, "title": title, "create": wiki_id is None}
+
+
 def validate(request: Any) -> dict[str, Any]:
     """Normalise the request. Every rejection names the field to fix."""
     if not isinstance(request, dict):
         raise WriteRejected("request", "must be an object")
 
-    wiki = _text(request.get("wiki"), "wiki")
+    wiki = _wiki_spec(request.get("wiki"))
     document_id = request.get("document_id")
     title = request.get("title")
     if document_id is None and title is None:
@@ -197,6 +321,42 @@ def _resolve_wiki(conn: sqlite3.Connection, name: str) -> int:
         f"no live wiki named {name!r}",
     )
     return row["id"]
+
+
+def _insert_wiki_row(conn: sqlite3.Connection, name: str, now: str) -> int:
+    cursor = conn.execute(
+        "INSERT INTO wiki (name, created_at, updated_at) VALUES (:name, :now, :now)",
+        {"name": name, "now": now},
+    )
+    return cursor.lastrowid
+
+
+def _resolve_wiki_spec(conn: sqlite3.Connection, spec: dict[str, Any], now: str) -> tuple[int, bool]:
+    """Return (wiki_id, created). String form resolves by name; an id must
+    resolve to a live wiki whose name matches; `create: True` inserts the
+    wiki inside this transaction."""
+    if spec["create"]:
+        if _duplicate_wiki(conn, spec["title"]):
+            raise WriteRejected(
+                "wiki.id",
+                f"a live wiki named {spec['title']!r} already exists; supply its wiki.id",
+            )
+        return _insert_wiki_row(conn, spec["title"], now), True
+    if spec["id"] is not None:
+        row = _row(
+            conn,
+            "SELECT id, name FROM wiki WHERE id = :id AND deleted_at IS NULL",
+            {"id": spec["id"]},
+            "wiki.id",
+            f"no live wiki with id {spec['id']}",
+        )
+        if row["name"].casefold() != spec["title"].casefold():
+            raise WriteRejected(
+                "wiki.title",
+                f"wiki id {spec['id']} is named {row['name']!r}, not {spec['title']!r}",
+            )
+        return row["id"], False
+    return _resolve_wiki(conn, spec["title"]), False
 
 
 def _resolve_document(conn, wiki_id: int, request: dict) -> tuple[int, bool]:
@@ -341,7 +501,7 @@ def commit(request: dict[str, Any]) -> dict[str, Any]:
         db.bootstrap(conn)
         conn.execute("BEGIN IMMEDIATE")
         now = db.utcnow()
-        wiki_id = _resolve_wiki(conn, request["wiki"])
+        wiki_id, wiki_created = _resolve_wiki_spec(conn, request["wiki"], now)
         document_id, created = _resolve_document(conn, wiki_id, request)
         _write_sections(conn, document_id, request["sections"], request["mode"], now)
         progress_id, progress_title = _insert_progress(conn, wiki_id, request, now)
@@ -359,7 +519,9 @@ def commit(request: dict[str, Any]) -> dict[str, Any]:
         conn.close()
 
     return {
-        "wiki": request["wiki"],
+        "wiki": request["wiki"]["title"],
+        "wiki_id": wiki_id,
+        "wiki_created": wiki_created,
         "document_id": document_id,
         "created": created,
         "progress_document_id": progress_id,
@@ -400,7 +562,7 @@ async def write_document(request: Any, *, write_id: str | None = None) -> dict[s
                 "write_document.committed",
                 write_id=write_id,
                 tool="write_document",
-                wiki=request["wiki"],
+                wiki=request["wiki"]["title"],
                 document_id=result["document_id"],
                 attempt=attempt,
             )
@@ -415,7 +577,7 @@ async def write_document(request: Any, *, write_id: str | None = None) -> dict[s
                 level=logging.WARNING,
                 write_id=write_id,
                 tool="write_document",
-                wiki=request["wiki"],
+                wiki=request["wiki"]["title"],
                 attempt=attempt,
                 error_type=type(exc).__name__,
                 error_message=str(exc),

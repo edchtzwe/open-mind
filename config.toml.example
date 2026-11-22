@@ -6,5 +6,21 @@ model = "BAAI/bge-small-en-v1.5"
 cache_path = ".fastembed_cache"
 
 [server]
+# Default stays loopback: the server has no auth yet. Bind 0.0.0.0 only
+# where the network itself is the boundary (a container or a private net).
 host = "127.0.0.1"
 port = 8765
+
+[logging]
+level = "INFO"
+format = "json"
+# stderr | file — stderr is what the container runtime collects.
+sink = "stderr"
+file = "openmind.log"
+max_bytes = 10485760
+backup_count = 5
+
+[write]
+# Total attempts, first try included. Transient failures only are retried.
+max_document_write_attempts = 3
+retry_backoff_seconds = 1

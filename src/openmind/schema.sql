@@ -5,7 +5,7 @@
 
 CREATE TABLE wiki (
     id          INTEGER PRIMARY KEY,
-    name        TEXT    NOT NULL UNIQUE,   -- NFKC-normalised, lowercase
+    name        TEXT    NOT NULL UNIQUE,   -- NFKC-normalised, casing preserved; lookups COLLATE NOCASE
     created_at  TEXT    NOT NULL,
     updated_at  TEXT    NOT NULL,
     deleted_at  TEXT

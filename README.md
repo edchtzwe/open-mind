@@ -75,17 +75,20 @@ container name or IP exactly as listed above, not a DNS alias you invent.
 
 ## Tools
 
-Seven, all stubs until the tool-signature group lands:
+Nine tools. The read surface and the write path are implemented; the three
+search tools are still stubs.
 
 | Tool | Purpose |
 | :--- | :--- |
-| `list_documents` | List documents in a wiki, to pick an edit target |
-| `doc_read` | Read a document's sections before editing |
+| `list_wikis` | Live wikis with document counts, to resolve a wiki name |
+| `list_documents` | Documents, optionally scoped to one wiki, to pick an edit target |
+| `read_document` | Full document: metadata, every section, references (`sections: null` unless requested) |
+| `create_wiki` | Create a wiki before writing its first document |
 | `write_document` | Document + progress + log, atomically |
-| `log_recall` | Recent log entries, optionally since a date |
-| `semantic_search` | Vector match over section embeddings (default) |
-| `fts_search` | Exact-token match over heading + body |
-| `table_search` | Wiki → documents → sections as plain rows |
+| `log_recall` | Log entries oldest first, each linked to its progress document |
+| `semantic_search` | *stub* — vector match over section embeddings (default) |
+| `fts_search` | *stub* — exact-token match over heading + body |
+| `table_search` | *stub* — wiki → documents → sections as plain rows |
 
 Machine-readable schemas are whatever `tools/list` advertises — the SDK derives
 them from the handler type hints, so they are final only when signatures are. No

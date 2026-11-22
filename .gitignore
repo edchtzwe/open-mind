@@ -10,8 +10,12 @@ build/
 
 # runtime
 *.log
+openmind-server.out
 
 # test stores — the fixture deletes these, and WAL leaves journals beside them
 *.db
 *.db-wal
 *.db-shm
+
+# local probe and smoke artefacts
+.run/

@@ -8,9 +8,11 @@ wheel bootstraps without the repo checkout.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
+from typing import Iterator
 
 from openmind.config import get
 
@@ -69,3 +71,19 @@ def bootstrap(conn: sqlite3.Connection) -> bool:
     # the BEGIN/COMMIT here is what makes the whole schema atomic.
     conn.executescript(f"BEGIN;\n{read_schema()}\nCOMMIT;")
     return True
+
+
+@contextmanager
+def connection(path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
+    """Open, bootstrap, and close in one step — the read-side entry point.
+
+    Writers own their transaction lifetime, so they call `connect()` directly;
+    readers do not, and closing in a `finally` is their whole contract. Both
+    still go through `connect()`, so there is one place that opens SQLite.
+    """
+    conn = connect(path)
+    try:
+        bootstrap(conn)
+        yield conn
+    finally:
+        conn.close()

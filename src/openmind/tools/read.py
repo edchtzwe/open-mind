@@ -287,3 +287,26 @@ def log_recall(since: str | None = None, limit: int = 50) -> dict[str, Any]:
             }
         )
     return {"entries": entries}
+
+
+# --- search: not implemented yet -------------------------------------------
+# These three stay advertised so the surface does not silently shrink; each
+# raises rather than returning an empty result that would read as "no matches".
+
+
+@mcp.tool()
+def semantic_search(query: str, wiki: str | None = None) -> list[dict]:
+    """Vector match over section embeddings — the default search."""
+    raise NotImplementedError("stub — embeddings and the model choice are pending")
+
+
+@mcp.tool()
+def fts_search(query: str, wiki: str | None = None) -> list[dict]:
+    """Exact-token match over section heading+body via FTS5."""
+    raise NotImplementedError("stub — pending the read/search group")
+
+
+@mcp.tool()
+def table_search(wiki_id: int, contains: str | None = None) -> list[dict]:
+    """Crawl wiki → documents → sections as plain rows; optional substring filter."""
+    raise NotImplementedError("stub — pending the read/search group")

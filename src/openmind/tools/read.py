@@ -16,8 +16,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections import defaultdict, deque
-from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Any
 
 from openmind import db
 from openmind.tools import mcp
@@ -26,21 +25,6 @@ _SINCE = re.compile(r"^\d{4}-\d{2}-\d{2}")
 
 
 # --- plumbing --------------------------------------------------------------
-
-
-@contextmanager
-def _connect() -> Iterator[sqlite3.Connection]:
-    """One connection, schema bootstrap included, closed on the way out.
-
-    `db.connect()` is looked up on the module at call time so a test can
-    rebind it to the disposable store, exactly as the write tests do.
-    """
-    conn = db.connect()
-    try:
-        db.bootstrap(conn)
-        yield conn
-    finally:
-        conn.close()
 
 
 def _sections(conn: sqlite3.Connection, document_id: int) -> list[dict[str, Any]]:
@@ -62,6 +46,8 @@ def _sections(conn: sqlite3.Connection, document_id: int) -> list[dict[str, Any]
 def _live_document(conn: sqlite3.Connection, document_id: Any) -> sqlite3.Row:
     if not isinstance(document_id, int) or isinstance(document_id, bool):
         raise ValueError("document_id: must be an integer")
+    # LEFT JOIN, not JOIN: a root document has no wiki row to join. The root
+    # document is the log — the single legitimate case of wiki_id IS NULL.
     row = conn.execute(
         """
         SELECT d.id, d.title, dt.name AS type_name, d.created_at, d.updated_at,
@@ -107,7 +93,7 @@ def list_wikis() -> list[dict[str, Any]]:
     `document_count` excludes deleted documents; root-level documents belong to
     no wiki and are not counted.
     """
-    with _connect() as conn:
+    with db.connection() as conn:
         rows = conn.execute(
             """
             SELECT w.id, w.name, w.created_at, w.updated_at,
@@ -130,7 +116,7 @@ def list_documents(wiki: str | None = None) -> list[dict[str, Any]]:
     row carries `id`, `title`, `type` and `updated_at` — no bodies. Read one
     with `read_document` once you know which you need.
     """
-    with _connect() as conn:
+    with db.connection() as conn:
         rows = conn.execute(
             """
             SELECT d.id, d.title, dt.name AS type_name, d.updated_at,
@@ -171,7 +157,7 @@ def read_document(document_id: int, include_cross_reference_content: bool = Fals
     the number of references, so pass it only when every referenced body is
     needed now; otherwise call `read_document` on the id you actually want.
     """
-    with _connect() as conn:
+    with db.connection() as conn:
         row = _live_document(conn, document_id)
         refs = conn.execute(
             """
@@ -231,7 +217,7 @@ def log_recall(since: str | None = None, limit: int = 50) -> dict[str, Any]:
         if not isinstance(since, str) or not _SINCE.match(since.strip()):
             raise ValueError("since: must be an ISO-8601 date or timestamp, e.g. 2026-11-22")
 
-    with _connect() as conn:
+    with db.connection() as conn:
         log = conn.execute(
             """
             SELECT d.id FROM document d

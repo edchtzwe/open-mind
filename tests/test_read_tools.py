@@ -252,3 +252,15 @@ def test_log_recall_filters_by_since_and_limit(world, path):
 
 def test_log_recall_on_a_store_without_a_root_log(store, path):
     assert read_tools.log_recall() == {"entries": []}
+
+
+# --- db.connection ---------------------------------------------------------
+
+
+def test_db_connection_bootstraps_and_closes(tmp_path):
+    with db.connection(tmp_path / "connection-test.db") as conn:
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM document_type").fetchone()[0] == 3
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute("SELECT 1")

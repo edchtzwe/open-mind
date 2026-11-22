@@ -12,7 +12,7 @@ from typing import Any
 
 _DEFAULTS: dict[str, Any] = {
     "embedding": {
-        "model": "BAAI/bge-small-en-v1.5",
+        "model": "BAAI/bge-base-en-v1.5",
         "cache_path": ".fastembed_cache",
     },
     "server": {

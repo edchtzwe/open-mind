@@ -7,6 +7,7 @@ enabling RBAC later means filling this one class in, nothing else changes.
 
 from __future__ import annotations
 
+import logging
 import socket
 
 import uvicorn
@@ -15,10 +16,12 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
-from openmind import __version__
+from openmind import __version__, telemetry
 from openmind.config import get
+from openmind.write import WriteFailed, WriteRejected
+from openmind.write import write_document as commit_document
 
-mcp = MCPServer("open-mind")
+mcp = MCPServer("open-mind", version=__version__)
 
 
 # --- tool stubs -----------------------------------------------------------
@@ -39,9 +42,53 @@ def doc_read(document_id: int) -> dict:
 
 
 @mcp.tool()
-def write_document(**kwargs) -> dict:
-    """Write a document plus its progress record and log entry, atomically."""
-    raise NotImplementedError("stub — validation rules still under review")
+async def write_document(
+    wiki: str,
+    sections: list[dict],
+    log_entry: str,
+    progress: dict,
+    title: str | None = None,
+    document_id: int | None = None,
+    references: list[dict] | None = None,
+    mode: str = "replace_all",
+) -> dict:
+    """Write one document with its progress record and log entry, atomically.
+
+    Give `title` to create, `document_id` to edit an existing document in the
+    same wiki. `sections` is [{"position", "heading", "body"}], positions 1-based
+    and unique; `mode` is "replace_all" (delete the document's sections first) or
+    "replace_positions" (replace only the positions supplied).
+    `log_entry` is one sentence; the server appends it to the root log.
+    `progress` is {"slug", "sections"} — the server numbers the title.
+    `references` lists {"wiki", "title"} of documents this one links to.
+    Progress is insert-only, the root log is system-only, and a root document
+    cannot be written or deleted. Every failure rolls the whole write back.
+    """
+    try:
+        return await commit_document(
+            {
+                "wiki": wiki,
+                "title": title,
+                "document_id": document_id,
+                "sections": sections,
+                "mode": mode,
+                "log_entry": log_entry,
+                "progress": progress,
+                "references": references,
+            }
+        )
+    except WriteRejected as exc:
+        telemetry.log_event(
+            "write_document.rejected",
+            level=logging.WARNING,
+            tool="write_document",
+            wiki=wiki,
+            error_type="WriteRejected",
+            error_message=str(exc),
+        )
+        raise ValueError(f"{exc.field}: {exc.reason}") from exc
+    except WriteFailed as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 @mcp.tool()
@@ -108,6 +155,14 @@ def create_app():
     """The Starlette app: SDK streamable-HTTP endpoint behind the HTTP gate."""
     host = get("server", "host") or "127.0.0.1"
     port = get("server", "port") or 8765
+    telemetry.configure()
+    telemetry.log_event(
+        "server.starting",
+        host=host,
+        port=port,
+        version=__version__,
+        mcp_path="/mcp",
+    )
     app = mcp.streamable_http_app(
         streamable_http_path="/mcp",
         transport_security=_security_settings(host, port),

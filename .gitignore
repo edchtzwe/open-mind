@@ -15,3 +15,6 @@ build/
 *.db
 *.db-wal
 *.db-shm
+
+# local probe and smoke artefacts
+.run/

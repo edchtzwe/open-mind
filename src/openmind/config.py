@@ -19,6 +19,18 @@ _DEFAULTS: dict[str, Any] = {
         "host": "127.0.0.1",
         "port": 8765,
     },
+    "logging": {
+        "level": "INFO",
+        "format": "json",
+        "sink": "stderr",
+        "file": "openmind.log",
+        "max_bytes": 10_485_760,
+        "backup_count": 5,
+    },
+    "write": {
+        "max_document_write_attempts": 3,
+        "retry_backoff_seconds": 1,
+    },
 }
 
 _path = Path("config.toml")

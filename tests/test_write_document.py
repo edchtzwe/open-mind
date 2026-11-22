@@ -159,3 +159,65 @@ def test_async_wrapper_returns_attempt_count(store, path):
     result = asyncio.run(write.write_document(_request(), write_id="test-write"))
     assert result["write_id"] == "test-write"
     assert result["attempts"] == 1
+
+
+def test_one_shot_creates_wiki_document_progress_and_log(store, path):
+    result = write.commit(
+        write.validate(_request(wiki={"id": None, "title": "New Wiki"}, references=[]))
+    )
+    assert result["wiki_created"] is True
+    assert result["created"] is True
+
+    wiki = store.execute(
+        "SELECT id FROM wiki WHERE name = 'New Wiki'"
+    ).fetchone()
+    assert wiki["id"] == result["wiki_id"]
+
+    progress = store.execute(
+        "SELECT COUNT(*) FROM document WHERE wiki_id = ? AND type_id ="
+        " (SELECT id FROM document_type WHERE name = 'progress')",
+        (result["wiki_id"],),
+    ).fetchone()[0]
+    assert progress == 1  # server numbers it from COUNT(*)
+
+    root_log = store.execute(
+        "SELECT d.id FROM document d JOIN document_type t ON t.id = d.type_id"
+        " WHERE t.name = 'log' AND d.wiki_id IS NULL"
+    ).fetchone()
+    assert result["log_document_id"] == root_log["id"]
+
+    edge = store.execute(
+        "SELECT COUNT(*) FROM document_cross_references"
+        " WHERE source_document_id = ? AND target_document_id = ?",
+        (result["progress_document_id"], result["document_id"]),
+    ).fetchone()[0]
+    assert edge == 1  # progress -> document, one write, one wiki
+
+
+def test_one_shot_with_foreign_reference_is_rejected(store, path):
+    before = _count(store, "SELECT COUNT(*) FROM wiki")
+    with pytest.raises(write.WriteRejected):
+        write.commit(
+            write.validate(
+                _request(wiki={"id": None, "title": "New Wiki"}, references=BUILD["references"])
+            )
+        )
+    assert _count(store, "SELECT COUNT(*) FROM wiki") == before
+    assert _count(store, "SELECT COUNT(*) FROM document WHERE title = 'Beta Notes'") == 0
+
+
+def test_unknown_wiki_id_dies(store, path):
+    before = _count(store, "SELECT COUNT(*) FROM document")
+    with pytest.raises(write.WriteRejected) as caught:
+        write.commit(write.validate(_request(wiki={"id": 999, "title": "test-wiki"})))
+    assert caught.value.field == "wiki.id"
+    assert _count(store, "SELECT COUNT(*) FROM document") == before
+
+
+def test_null_id_with_existing_name_rejects_as_duplicate(store, path):
+    before = _count(store, "SELECT COUNT(*) FROM wiki")
+    with pytest.raises(write.WriteRejected) as caught:
+        write.commit(write.validate(_request(wiki={"id": None, "title": "Test-Wiki"})))
+    assert caught.value.field == "wiki.id"
+    assert "already exists" in caught.value.reason
+    assert _count(store, "SELECT COUNT(*) FROM wiki") == before

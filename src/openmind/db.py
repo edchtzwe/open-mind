@@ -16,8 +16,15 @@ from typing import Iterator
 
 from openmind.config import get
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_PATH = "openmind.db"
+
+# Author stamped on every *_by column by the server's own writes. The store
+# has no authentication yet (RULES.md A07), so a named constant beats a fake
+# user id: when RBAC lands, this is the one place that changes to the caller's
+# identity. Workers stamp WORKER below for background backfills.
+AUTHORED_BY = "open-mind"
+WORKER = "open-mind-worker"
 
 
 def read_schema() -> str:

@@ -13,6 +13,10 @@ dependencies = [
     "mcp>=2.3.0",
     "fastembed",
     "uvicorn>=0.31",
+    # Embedding R/W through OpenRouter (OpenAI-compatible endpoint) — checked
+    # at adding per RULES.md A06; huey is the embed worker's queue on SQLite.
+    "openai>=3.60",
+    "huey>=3.5.4",
 ]
 
 [project.optional-dependencies]

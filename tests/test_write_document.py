@@ -112,6 +112,39 @@ def test_write_lands_document_progress_log_and_edges(store, path):
     assert edges == 2  # document -> Alpha Notes, progress -> document
 
 
+def test_write_defers_embedding_and_enqueues_after_commit(store, path):
+    """Sections land with NULL vectors inside the transaction; the enqueue is
+    post-commit — one task carrying every section this write inserted."""
+    from openmind import worker
+
+    before = set(worker.pending_section_ids(store))  # seed rows, never embedded
+    result = write.commit(write.validate(_request()))
+    # All three payloads: document sections, progress sections, log entry.
+    assert worker.huey.pending_count() == 1
+
+    embedded = _count(
+        store,
+        "SELECT COUNT(*) FROM document_content_section WHERE embedding IS NOT NULL",
+    )
+    assert embedded == 0  # nothing talked to a model during the write
+
+    new_sections = _count(
+        store,
+        "SELECT COUNT(*) FROM document_content_section WHERE id > 3",  # beyond the seed
+    )
+    assert new_sections == 4  # 2 document + 1 progress + 1 log
+    pending = set(worker.pending_section_ids(store))
+    assert len(pending - before) == 4  # the write's four sections joined the queue
+
+
+def test_enqueue_failure_never_fails_the_write(store, path, monkeypatch):
+    from openmind import worker
+
+    monkeypatch.setattr(worker, "enqueue", lambda ids: False)
+    result = write.commit(write.validate(_request()))
+    assert result["created"] is True  # the document is durable regardless
+
+
 def test_log_appends_one_section_per_write(store, path):
     first = write.commit(write.validate(_request()))
     second = write.commit(write.validate(_request(title="Gamma Notes", log_entry="Wrote Gamma Notes.")))

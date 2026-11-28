@@ -4,6 +4,10 @@
 [embedding]
 model = "BAAI/bge-small-en-v1.5"
 cache_path = ".fastembed_cache"
+# Non-empty routes embedding R/W to OpenRouter's OpenAI-compatible endpoint;
+# empty falls back to fastembed (which downloads the model on first run).
+# The token never goes here: it lives in .env as OPENROUTER_API_KEY.
+openrouter_model = ""
 
 [server]
 # Default stays loopback: the server has no auth yet. Bind 0.0.0.0 only
@@ -24,3 +28,11 @@ backup_count = 5
 # Total attempts, first try included. Transient failures only are retried.
 max_document_write_attempts = 3
 retry_backoff_seconds = 1
+
+[worker]
+# Huey queue storage: its own SQLite file, never openmind.db — two writers
+# would fight over SQLite's single-writer lock. Pending tasks only; a
+# completed task is popped, and tasks return None so no result rows exist.
+queue_path = "huey.sqlite3"
+max_retries = 5
+retry_delay_seconds = 15

@@ -14,11 +14,18 @@ actually needed.
 from __future__ import annotations
 
 import re
+import logging
 import sqlite3
 from collections import defaultdict, deque
 from typing import Any
 
-from openmind import db
+from openmind import db, telemetry
+from openmind.embedding import (
+    EmbeddingUnhealthy,
+    blob_to_vector,
+    configured_embedder,
+    embedding_health,
+)
 from openmind.tools import mcp
 
 _SINCE = re.compile(r"^\d{4}-\d{2}-\d{2}")
@@ -295,9 +302,143 @@ def log_recall(since: str | None = None, limit: int = 50) -> dict[str, Any]:
 
 
 @mcp.tool()
-def semantic_search(query: str, wiki: str | None = None) -> list[dict]:
-    """Vector match over section embeddings — the default search."""
-    raise NotImplementedError("stub — embeddings and the model choice are pending")
+def semantic_search(query: str, wiki: str | None = None) -> list[dict[str, Any]]:
+    """Vector match over section embeddings — the default search.
+
+    The health gate runs first: vectors from a different model than the one
+    configured are not comparable, so model drift refuses loudly with the
+    three ways out (reembed, clear `openrouter_model`, don't use semantic
+    search) instead of quietly returning matches against the wrong space.
+    Sections mid-embed are simply absent — the vectors that exist are valid,
+    and the worker finishes the rest.
+
+    Returns whole sections, best match first, each carrying its document and
+    wiki so the caller can follow up with `read_document`. Cosine similarity
+    is computed over every live vector in Python: at document-edit volume
+    brute force beats an index, and it keeps the store free of extensions.
+    """
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query: must be a non-empty string")
+
+    with db.connection() as conn:
+        health = embedding_health(conn)
+        if health["broken"]:
+            raise EmbeddingUnhealthy(
+                f"{health['broken']} section(s) have a corrupted embedding record "
+                "(vector, model and text must be all set or all empty); semantic "
+                "search is unsafe — reconcile with your user (doctor)"
+            )
+        if health["stale"]:
+            raise EmbeddingUnhealthy(
+                f"{health['stale']} section(s) are embedded with a model other than "
+                f"{health['model']!r} (model drift); vectors from two models are not "
+                "comparable. Choose: reembed the store, clear [embedding] "
+                "openrouter_model, or don't use semantic search"
+            )
+
+        wiki_id = _wiki_id(conn, wiki) if wiki is not None else None
+        rows = conn.execute(
+            """
+            SELECT s.id, s.position, s.heading, s.body, s.embedding, s.document_id,
+                   d.title AS document_title, w.name AS wiki_name
+            FROM document_content_section s
+            JOIN document d ON d.id = s.document_id
+            LEFT JOIN wiki w ON w.id = d.wiki_id
+            WHERE s.deleted_at IS NULL
+              AND s.embedding IS NOT NULL
+              AND d.deleted_at IS NULL
+              AND (d.wiki_id IS NULL OR w.deleted_at IS NULL)
+              AND (:wiki_id IS NULL OR d.wiki_id = :wiki_id)
+            """,
+            {"wiki_id": wiki_id},
+        ).fetchall()
+
+    if not rows:
+        return []
+
+    query_vector = _embed_query(query.strip())
+    scored: list[tuple[float, sqlite3.Row]] = []
+    for row in rows:
+        vector = _row_vector(row)
+        if len(vector) != len(query_vector):
+            # A dimension mismatch means the stored vector came from a model
+            # with a different width than the configured one under the same
+            # name — treat it as drift, not as a zero score.
+            raise EmbeddingUnhealthy(
+                f"section {row['id']} carries a {len(vector)}-dimension vector; "
+                f"{health['model']!r} produces {len(query_vector)} — model drift, "
+                "reembed or clear openrouter_model"
+            )
+        scored.append((_cosine(query_vector, vector), row))
+
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [
+        {
+            "section_id": row["id"],
+            "score": round(score, 6),
+            "document_id": row["document_id"],
+            "document_title": row["document_title"],
+            "wiki": row["wiki_name"],
+            "position": row["position"],
+            "heading": row["heading"],
+            "body": row["body"],
+        }
+        for score, row in scored
+    ]
+
+
+def _embed_query(text: str) -> list[float]:
+    """Embed the search query, translating provider failures into our
+    vocabulary. Nothing is swallowed: the original error is chained and
+    attached to the log line, so a 401 or a dead network reads as
+    `embedding the query failed: ...` instead of an openai stack trace.
+    """
+    try:
+        return configured_embedder().embed([text])[0]
+    except Exception as exc:  # noqa: BLE001 — translated, logged, re-raised
+        telemetry.log_event(
+            "semantic_search.embed_failed",
+            level=logging.WARNING,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
+        raise RuntimeError(
+            f"embedding the query failed ({type(exc).__name__}: {exc}) — "
+            "check [embedding] openrouter_model, your OPENROUTER_API_KEY, "
+            "and network access"
+        ) from exc
+
+
+def _row_vector(row: sqlite3.Row) -> list[float]:
+    """Decode one stored vector, translating a corrupt blob into the same
+    loud vocabulary. The CHECK constraint guarantees all-or-nothing columns,
+    not blob validity — a truncated vector is `broken` the hard way.
+    """
+    try:
+        return blob_to_vector(row["embedding"])
+    except Exception as exc:  # noqa: BLE001 — translated, logged, re-raised
+        telemetry.log_event(
+            "semantic_search.corrupt_vector",
+            level=logging.WARNING,
+            error_type=type(exc).__name__,
+            section_id=row["id"],
+        )
+        raise EmbeddingUnhealthy(
+            f"section {row['id']} carries an unreadable embedding blob "
+            f"({type(exc).__name__}); semantic search is unsafe — "
+            "reconcile with your user (doctor)"
+        ) from exc
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity. Zero-norm vectors (a degenerate embed) score 0 —
+    matching nothing beats dividing by zero."""
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(y * y for y in b) ** 0.5
+    if not norm_a or not norm_b:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
 
 @mcp.tool()

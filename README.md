@@ -75,8 +75,8 @@ container name or IP exactly as listed above, not a DNS alias you invent.
 
 ## Tools
 
-Nine tools. The read surface and the write path are implemented; the three
-search tools are still stubs.
+Nine tools. The read surface, the write path and `semantic_search` are
+implemented; `fts_search` and `table_search` remain stubs.
 
 | Tool | Purpose |
 | :--- | :--- |
@@ -86,7 +86,7 @@ search tools are still stubs.
 | `create_wiki` | Create a wiki before writing its first document |
 | `write_document` | Document + progress + log, atomically |
 | `log_recall` | Log entries oldest first, each linked to its progress document |
-| `semantic_search` | *stub* — vector match over section embeddings (default) |
+| `semantic_search` | Vector match over section embeddings (default) — health-gated, see below |
 | `fts_search` | *stub* — exact-token match over heading + body |
 | `table_search` | *stub* — wiki → documents → sections as plain rows |
 
@@ -95,6 +95,50 @@ them from the handler type hints, so they are final only when signatures are. No
 OpenAPI document is generated: `/mcp` is one JSON-RPC endpoint, and an OpenAPI file
 would describe a single POST with a union body while saying nothing about the
 tools.
+
+## Embedding: deferred, provider-pluggable
+
+`write_document` never talks to a model. Sections land with NULL vectors inside
+the write transaction; after COMMIT the ids are enqueued to a Huey queue (its own
+`huey.sqlite3`, never the store's file) and a worker process backfills them. A
+slow or dead provider therefore cannot hold up or roll back a write; a crash
+between COMMIT and enqueue leaves pending sections, which is exactly what the
+doctor counts and reconciles.
+
+Provider selection is one flag in `config.toml`:
+
+```toml
+[embedding]
+openrouter_model = ""              # non-empty → OpenRouter; empty → fastembed
+```
+
+- **Non-empty**: embeddings route through OpenRouter's OpenAI-compatible
+  endpoint. The model string is sent as-is — if it is wrong, the error is the
+  operator's to fix. The token comes from `.env` (beside `config.toml`), then
+  `../.env`, then the process environment — never `config.toml`. With the flag
+  set and no token anywhere, **the server refuses to boot** rather than silently
+  embedding with a different model.
+- **Empty**: fastembed downloads the model on first run into `.fastembed_cache`
+  (setup step, not a repo artefact).
+
+### Worker, doctor, health gate
+
+```bash
+.venv/bin/python -m openmind.worker     # consumer: one blocking HTTP call per batch
+.venv/bin/python -m openmind.doctor     # wake report: pending / stale / broken
+.venv/bin/python -m openmind.doctor --reconcile   # enqueue every pending section
+```
+
+The doctor suggests, never auto-runs, and exits 1 on anything unhealthy.
+`semantic_search` runs the same three counts on every call:
+
+- **pending** (mid-embed) → allowed; in-flight sections are simply absent.
+- **stale** (vectors from another model — drift) → refuses loudly: reembed,
+  clear `openrouter_model`, or don't use semantic search.
+- **broken** (all-or-nothing CHECK violated) → refuses loudly; unsafe.
+
+Cosine similarity runs in Python over every live vector — at document-edit
+volume brute force beats an index, and the store stays free of extensions.
 
 ## No authentication yet
 

@@ -36,6 +36,11 @@ _DEFAULTS: dict[str, Any] = {
         "max_document_write_attempts": 3,
         "retry_backoff_seconds": 1,
     },
+    "worker": {
+        "queue_path": "huey.sqlite3",
+        "max_retries": 5,
+        "retry_delay_seconds": 15,
+    },
 }
 
 _path = Path("config.toml")

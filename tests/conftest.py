@@ -24,6 +24,18 @@ REPO_ROOT = TESTS_DIR.parent
 DEFAULT_TEST_DB = TESTS_DIR / "openmind-test.db"
 
 
+@pytest.fixture(autouse=True)
+def clean_queue():
+    """The Huey queue file is repo-global: any test that writes a document
+    enqueues a real task. Empty before and after, so no run leaks pending
+    tasks into the next one — same contract as the destroyed test store."""
+    from openmind import worker
+
+    worker.huey.flush()
+    yield
+    worker.huey.flush()
+
+
 def _refuse(message: str) -> None:
     """Abort the run. Destroying the store is unconditional, so a doubtful
     path is a stop, never a warning-and-continue."""

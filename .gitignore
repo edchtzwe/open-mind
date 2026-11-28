@@ -19,3 +19,8 @@ openmind-server.out
 
 # local probe and smoke artefacts
 .run/
+
+# huey queue — pending embed tasks, rebuilt by doctor --reconcile
+huey.sqlite3
+huey.sqlite3-wal
+huey.sqlite3-shm

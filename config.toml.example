@@ -28,3 +28,11 @@ backup_count = 5
 # Total attempts, first try included. Transient failures only are retried.
 max_document_write_attempts = 3
 retry_backoff_seconds = 1
+
+[worker]
+# Huey queue storage: its own SQLite file, never openmind.db — two writers
+# would fight over SQLite's single-writer lock. Pending tasks only; a
+# completed task is popped, and tasks return None so no result rows exist.
+queue_path = "huey.sqlite3"
+max_retries = 5
+retry_delay_seconds = 15

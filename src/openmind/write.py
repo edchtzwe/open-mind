@@ -121,7 +121,7 @@ def _commit_wiki(name: str) -> dict[str, Any]:
             raise WriteRejected("name", f"a live wiki named {name!r} already exists")
         wiki_id = _insert_wiki_row(conn, name, now)
         log_id = _root_log(conn, now)
-        log_position = _append_log(conn, log_id, f"Created wiki {name!r}.", now)
+        log_position, log_section_id = _append_log(conn, log_id, f"Created wiki {name!r}.", now)
         conn.execute("COMMIT")
     except BaseException:
         if conn.in_transaction:
@@ -129,6 +129,11 @@ def _commit_wiki(name: str) -> dict[str, Any]:
         raise
     finally:
         conn.close()
+
+    # Post-commit: the wiki is durable; embedding it is the worker's job.
+    from openmind import worker
+
+    worker.enqueue([log_section_id])
 
     return {
         "wiki": name,
@@ -401,8 +406,10 @@ def _resolve_document(conn, wiki_id: int, request: dict) -> tuple[int, bool]:
     return row["id"], False
 
 
-def _write_sections(conn, document_id: int, sections: list[dict], mode: str, now: str) -> None:
-    """Position-addressed replacement. Mode decides the blast radius."""
+def _write_sections(conn, document_id: int, sections: list[dict], mode: str, now: str) -> list[int]:
+    """Position-addressed replacement. Mode decides the blast radius.
+    Returns the ids of the sections this write inserted — the caller enqueues
+    their embedding after COMMIT, never inside the transaction."""
     if mode == "replace_all":
         conn.execute(
             "DELETE FROM document_content_section WHERE document_id = :id",
@@ -414,14 +421,17 @@ def _write_sections(conn, document_id: int, sections: list[dict], mode: str, now
                 "DELETE FROM document_content_section WHERE document_id = :id AND position = :position",
                 {"id": document_id, "position": section["position"]},
             )
+    inserted: list[int] = []
     for section in sections:
-        conn.execute(
+        cursor = conn.execute(
             _INSERT_SECTION,
             {"document_id": document_id, **section, "now": now, "by": db.AUTHORED_BY},
         )
+        inserted.append(cursor.lastrowid)
+    return inserted
 
 
-def _insert_progress(conn, wiki_id: int, request: dict, now: str) -> tuple[int, str]:
+def _insert_progress(conn, wiki_id: int, request: dict, now: str) -> tuple[int, str, list[int]]:
     count = conn.execute(
         """
         SELECT COUNT(*) AS n FROM document
@@ -436,12 +446,14 @@ def _insert_progress(conn, wiki_id: int, request: dict, now: str) -> tuple[int, 
         {"wiki_id": wiki_id, "title": title, "now": now, "by": db.AUTHORED_BY},
     )
     progress_id = cursor.lastrowid
+    inserted: list[int] = []
     for section in request["progress_sections"]:
-        conn.execute(
+        section_cursor = conn.execute(
             _INSERT_SECTION,
             {"document_id": progress_id, **section, "now": now, "by": db.AUTHORED_BY},
         )
-    return progress_id, title
+        inserted.append(section_cursor.lastrowid)
+    return progress_id, title, inserted
 
 
 def _root_log(conn, now: str) -> int:
@@ -465,13 +477,15 @@ def _root_log(conn, now: str) -> int:
     return cursor.lastrowid
 
 
-def _append_log(conn, log_id: int, entry: str, now: str) -> int:
+def _append_log(conn, log_id: int, entry: str, now: str) -> tuple[int, int]:
+    """Append one root-log entry. Returns (position, section_id) — the section
+    id joins the embedding queue like any other; the log is searchable text too."""
     row = conn.execute(
         "SELECT COALESCE(MAX(position), 0) AS top FROM document_content_section WHERE document_id = :id",
         {"id": log_id},
     ).fetchone()
     position = row["top"] + 1
-    conn.execute(
+    cursor = conn.execute(
         _INSERT_SECTION,
         {
             "document_id": log_id,
@@ -482,7 +496,7 @@ def _append_log(conn, log_id: int, entry: str, now: str) -> int:
             "by": db.AUTHORED_BY,
         },
     )
-    return position
+    return position, cursor.lastrowid
 
 
 def _link(conn, source: int, target: int, now: str) -> None:
@@ -519,7 +533,13 @@ def _link_references(conn, document_id: int, wiki_id: int, references: list[dict
 
 
 def commit(request: dict[str, Any]) -> dict[str, Any]:
-    """One attempt. Caller owns retries."""
+    """One attempt. Caller owns retries.
+
+    Embedding is deferred: the transaction writes sections with NULL vectors
+    and returns their ids, and the enqueue runs after COMMIT — the document
+    is durable before any model is touched. A crash between the two leaves
+    pending sections, which is exactly what `doctor --reconcile` re-enqueues.
+    """
     conn = db.connect()
     conn.isolation_level = None  # explicit BEGIN IMMEDIATE, explicit COMMIT
     try:
@@ -528,12 +548,14 @@ def commit(request: dict[str, Any]) -> dict[str, Any]:
         now = db.utcnow()
         wiki_id, wiki_created = _resolve_wiki_spec(conn, request["wiki"], now)
         document_id, created = _resolve_document(conn, wiki_id, request)
-        _write_sections(conn, document_id, request["sections"], request["mode"], now)
-        progress_id, progress_title = _insert_progress(conn, wiki_id, request, now)
+        section_ids = _write_sections(conn, document_id, request["sections"], request["mode"], now)
+        progress_id, progress_title, progress_section_ids = _insert_progress(
+            conn, wiki_id, request, now
+        )
         _link(conn, progress_id, document_id, now)
         _link_references(conn, document_id, wiki_id, request["references"], now)
         log_id = _root_log(conn, now)
-        log_position = _append_log(conn, log_id, request["log_entry"], now)
+        log_position, log_section_id = _append_log(conn, log_id, request["log_entry"], now)
         _link(conn, log_id, progress_id, now)
         conn.execute("COMMIT")
     except BaseException:
@@ -542,6 +564,12 @@ def commit(request: dict[str, Any]) -> dict[str, Any]:
         raise
     finally:
         conn.close()
+
+    # Post-commit: one task for every section this write inserted. The queue
+    # is on its own file, so this can never reopen the transaction above.
+    from openmind import worker
+
+    worker.enqueue(section_ids + progress_section_ids + [log_section_id])
 
     return {
         "wiki": request["wiki"]["title"],

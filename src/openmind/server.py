@@ -18,7 +18,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
 from openmind import __version__, telemetry
-from openmind.config import get
+from openmind.config import ENV_FILE, GLOBAL_ENV_FILE, get
+from openmind.embedding import openrouter_key
 from openmind.tools import mcp
 
 
@@ -58,10 +59,28 @@ def _security_settings(host: str, port: int) -> TransportSecuritySettings:
     )
 
 
+def check_openrouter_config() -> None:
+    """Fail-fast at startup: `[embedding] openrouter_model` without a token
+    anywhere is a configuration error, not something to discover on the first
+    embed. Called once from `server.create_app()`; the .env chain is checked
+    first, the process environment last, so a container can inject the key.
+    """
+    openrouter_model = (get("embedding", "openrouter_model") or "").strip()
+    if openrouter_model and not openrouter_key():
+        raise RuntimeError(
+            f"embedding.openrouter_model is set to {openrouter_model!r} but no "
+            f"OPENROUTER_API_KEY was found.\n"
+            f"  Provide it in {ENV_FILE} (beside config.toml), {GLOBAL_ENV_FILE} "
+            "(one level up), or the process environment — or clear openrouter_model "
+            "to fall back to fastembed."
+        )
+
+
 def create_app():
     """The Starlette app: SDK streamable-HTTP endpoint behind the HTTP gate."""
     host = get("server", "host") or "127.0.0.1"
     port = get("server", "port") or 8765
+    check_openrouter_config()  # refuse to boot with a flag and no token
     telemetry.configure()
     telemetry.log_event(
         "server.starting",

@@ -100,3 +100,98 @@ def test_configured_embedder_falls_back_to_the_documented_defaults(monkeypatch):
 
 def test_fastembed_satisfies_the_protocol():
     assert isinstance(embedding.FastEmbedEmbedder("m", ".c"), embedding.Embedder)
+
+
+# --- OpenRouter ------------------------------------------------------------
+
+
+def test_configured_embedder_routes_to_openrouter_when_flag_set(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("OPENROUTER_API_KEY=sk-test-123\n", encoding="utf-8")
+    values = {("embedding", "openrouter_model"): "openai/text-embedding-3-small"}
+    monkeypatch.setattr(embedding, "get", lambda section, key: values.get((section, key)))
+
+    embedder = embedding.configured_embedder()
+
+    assert isinstance(embedder, embedding.OpenRouterEmbedder)
+    assert embedder.model_name == "openai/text-embedding-3-small"
+    assert embedder.api_key == "sk-test-123"
+
+
+def test_configured_embedder_refuses_openrouter_without_a_token(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)  # no .env beside, no ../.env above, no env var
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    values = {("embedding", "openrouter_model"): "openai/text-embedding-3-small"}
+    monkeypatch.setattr(embedding, "get", lambda section, key: values.get((section, key)))
+
+    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
+        embedding.configured_embedder()
+
+
+def test_empty_flag_falls_back_to_fastembed(monkeypatch):
+    monkeypatch.setattr(embedding, "get", lambda section, key: "")
+    embedder = embedding.configured_embedder()
+    assert isinstance(embedder, embedding.FastEmbedEmbedder)
+
+
+def test_env_chain_prefers_colocated_then_global_then_process(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "process")
+    assert embedding.openrouter_key() == "process"  # neither file exists
+
+    (tmp_path.parent / ".env").write_text("OPENROUTER_API_KEY=global\n", encoding="utf-8")
+    try:
+        assert embedding.openrouter_key() == "global"
+        (tmp_path / ".env").write_text("OPENROUTER_API_KEY=colocated\n", encoding="utf-8")
+        assert embedding.openrouter_key() == "colocated"
+    finally:
+        (tmp_path.parent / ".env").unlink(missing_ok=True)
+
+
+def test_openrouter_embedder_builds_client_lazily(monkeypatch):
+    created = []
+
+    class StubOpenAI:
+        def __init__(self, base_url, api_key):
+            created.append((base_url, api_key))
+            self.embeddings = self
+
+        def create(self, model, input):
+            class Item:
+                index, embedding = 0, [0.1, 0.2]
+
+            class Response:
+                data = [Item()]
+
+            return Response()
+
+    import openai
+
+    monkeypatch.setattr(openai, "OpenAI", StubOpenAI)
+    embedder = embedding.OpenRouterEmbedder("openai/text-embedding-3-small", "key-1")
+
+    assert created == []  # constructed, not connected
+    vectors = embedder.embed(["kestrel"])
+    assert created == [(embedding.OPENROUTER_BASE_URL, "key-1")]
+    assert vectors == [[0.1, 0.2]]
+    embedder.embed(["basalt"])
+    assert len(created) == 1  # client reused
+
+
+def test_openrouter_satisfies_the_protocol():
+    assert isinstance(embedding.OpenRouterEmbedder("m", "k"), embedding.Embedder)
+
+
+def test_server_refuses_to_boot_with_a_flag_and_no_token(monkeypatch, tmp_path):
+    from openmind import server
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    values = {("embedding", "openrouter_model"): "openai/text-embedding-3-small"}
+    monkeypatch.setattr(server, "get", lambda section, key: values.get((section, key)))
+
+    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
+        server.check_openrouter_config()
+
+    values[("embedding", "openrouter_model")] = ""
+    server.check_openrouter_config()  # empty flag: no complaint

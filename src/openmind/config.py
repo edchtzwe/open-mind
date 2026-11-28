@@ -6,6 +6,7 @@ takes effect on the next tool call — no server restart, no reload endpoint.
 
 from __future__ import annotations
 
+import os
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,10 @@ _DEFAULTS: dict[str, Any] = {
     "embedding": {
         "model": "BAAI/bge-base-en-v1.5",
         "cache_path": ".fastembed_cache",
+        # Non-empty routes embedding R/W to OpenRouter (OpenAI SDK, base_url
+        # openrouter.ai); empty falls back to fastembed. The operator owns
+        # this string — it is sent as-is, never validated, never substituted.
+        "openrouter_model": "",
     },
     "server": {
         "host": "127.0.0.1",
@@ -85,3 +90,44 @@ def get(section: str, key: str | None = None) -> Any:
     if not isinstance(value, dict):
         return None
     return value.get(key)
+
+
+# --- .env chain ------------------------------------------------------------
+
+ENV_FILE = ".env"
+GLOBAL_ENV_FILE = "../.env"
+
+
+def _env_file(path: str) -> dict[str, str]:
+    """Parse one KEY=VALUE env file. Unreadable or malformed lines are
+    skipped, never guessed: a broken line must not become a wrong secret."""
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    out: dict[str, str] = {}
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        out[key.strip()] = value.strip().strip("'\"")
+    return out
+
+
+def env(name: str) -> str | None:
+    """Read one secret: colocated `.env`, then the global `../.env`, then the
+    process environment. The file chain is the documented home for tokens
+    (config.toml stays credential-free, RULES.md A02); the process env is the
+    final fallback so a container can inject the same variable.
+
+    Every call re-reads the files: `config.py`'s mtime cache does not apply
+    here, so a rotated token takes effect on the next call, not the next
+    restart.
+    """
+    for path in (ENV_FILE, GLOBAL_ENV_FILE):
+        value = _env_file(path).get(name)
+        if value:
+            return value
+    value = os.environ.get(name)
+    return value or None

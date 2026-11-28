@@ -15,10 +15,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from openmind.config import get
+from openmind.config import ENV_FILE, GLOBAL_ENV_FILE, env, get
 
 DEFAULT_MODEL = "BAAI/bge-base-en-v1.5"
 DEFAULT_CACHE_PATH = ".fastembed_cache"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_API_KEY = "OPENROUTER_API_KEY"
 
 
 @runtime_checkable
@@ -63,12 +65,67 @@ class FastEmbedEmbedder:
         return [list(vector) for vector in vectors]
 
 
+class OpenRouterEmbedder:
+    """Embeddings through OpenRouter's OpenAI-compatible endpoint.
+
+    The openai SDK with `base_url` pointed at OpenRouter: one dependency,
+    no client of our own. The model string comes from
+    `[embedding] openrouter_model` and is sent as-is — if the operator
+    names a model OpenRouter rejects, that error surfaces, it is not ours
+    to paper over.
+
+    The key comes from the `.env` chain (colocated, then global), never
+    from config.toml. Construction is lazy in the same way fastembed's is:
+    the HTTP client is built on first use, so a caller that never embeds
+    never opens a socket.
+    """
+
+    def __init__(self, model: str, api_key: str) -> None:
+        self.model_name = model
+        self.api_key = api_key
+        self._client: object | None = None
+
+    def _load(self) -> object:
+        if self._client is None:
+            from openai import OpenAI
+
+            self._client = OpenAI(base_url=OPENROUTER_BASE_URL, api_key=self.api_key)
+        return self._client
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        response = self._load().embeddings.create(model=self.model_name, input=list(texts))  # type: ignore[attr-defined]
+        # OpenRouter returns data ordered by index; sort defensively so a
+        # reordered response cannot silently pair texts with the wrong vector.
+        ordered = sorted(response.data, key=lambda item: item.index)
+        return [[float(value) for value in item.embedding] for item in ordered]
+
+
+def openrouter_key() -> str | None:
+    """The OpenRouter token from the `.env` chain, or None if nowhere has one."""
+    return env(OPENROUTER_API_KEY)
+
+
 def configured_embedder() -> Embedder:
     """The embedder `config.toml` describes.
 
     Read at call time, so an edited `[embedding]` section applies on the next
     tool call without a restart — the same contract as every other setting.
+
+    A non-empty `openrouter_model` means the operator chose OpenRouter: the
+    model string is theirs, and a missing token is a loud failure, never a
+    silent fall back to fastembed (which would embed with a different model
+    and poison the vectors).
     """
+    openrouter_model = (get("embedding", "openrouter_model") or "").strip()
+    if openrouter_model:
+        key = openrouter_key()
+        if not key:
+            raise RuntimeError(
+                "embedding.openrouter_model is set but no OPENROUTER_API_KEY was found; "
+                f"add it to {ENV_FILE} or {GLOBAL_ENV_FILE}, or clear openrouter_model"
+            )
+        return OpenRouterEmbedder(openrouter_model, key)
+
     model = get("embedding", "model") or DEFAULT_MODEL
     cache_path = get("embedding", "cache_path") or DEFAULT_CACHE_PATH
     return FastEmbedEmbedder(str(model), str(cache_path))

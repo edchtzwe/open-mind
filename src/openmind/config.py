@@ -7,6 +7,7 @@ takes effect on the next tool call — no server restart, no reload endpoint.
 from __future__ import annotations
 
 import os
+import logging
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -75,8 +76,15 @@ def _load() -> dict[str, Any]:
     try:
         with _path.open("rb") as fh:
             loaded = tomllib.load(fh)
-    except (OSError, tomllib.TOMLDecodeError):
-        # Unreadable or malformed config: keep the last good copy.
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        # Unreadable or malformed config: keep the last good copy — but say
+        # so once per parse (RULES.md A09: the silent fallback is the repo's
+        # documented anti-pattern; a failed reload must leave a trace).
+        logging.getLogger("openmind.config").warning(
+            "config.toml unreadable or malformed (%s); %s",
+            exc,
+            "keeping the last good copy" if _cached is not None else "using defaults",
+        )
         if _cached is not None:
             return _cached
         loaded = {}

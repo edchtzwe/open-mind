@@ -35,8 +35,9 @@ def seed(conn: sqlite3.Connection) -> None:
     """Insert the fixture rows. Committed, so a second connection sees them."""
     now = db.utcnow()
     wiki_id = conn.execute(
-        "INSERT INTO wiki (name, created_at, updated_at) VALUES (?, ?, ?)",
-        (WIKI, now, now),
+        "INSERT INTO wiki (name, created_at, created_by, updated_at, updated_by)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (WIKI, now, db.AUTHORED_BY, now, db.AUTHORED_BY),
     ).lastrowid
 
     document_ids: dict[str, int] = {}
@@ -45,24 +46,33 @@ def seed(conn: sqlite3.Connection) -> None:
             "SELECT id FROM document_type WHERE name = ?", (type_name,)
         ).fetchone()[0]
         document_ids[title] = conn.execute(
-            "INSERT INTO document (wiki_id, type_id, title, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (wiki_id, type_id, title, now, now),
+            "INSERT INTO document (wiki_id, type_id, title, created_at, created_by, updated_at, updated_by)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (wiki_id, type_id, title, now, db.AUTHORED_BY, now, db.AUTHORED_BY),
         ).lastrowid
 
     for title, position, heading, body in SECTIONS:
         conn.execute(
             "INSERT INTO document_content_section"
-            " (document_id, position, heading, body, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (document_ids[title], position, heading, body, now, now),
+            " (document_id, position, heading, body, created_at, created_by, updated_at, updated_by)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                document_ids[title],
+                position,
+                heading,
+                body,
+                now,
+                db.AUTHORED_BY,
+                now,
+                db.AUTHORED_BY,
+            ),
         )
 
     source, target = CROSS_REFERENCE
     conn.execute(
         "INSERT INTO document_cross_references"
-        " (source_document_id, target_document_id, created_at) VALUES (?, ?, ?)",
-        (document_ids[source], document_ids[target], now),
+        " (source_document_id, target_document_id, created_at, created_by) VALUES (?, ?, ?, ?)",
+        (document_ids[source], document_ids[target], now, db.AUTHORED_BY),
     )
 
     conn.commit()

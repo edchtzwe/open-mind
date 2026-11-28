@@ -42,8 +42,9 @@ def _type_id(store: sqlite3.Connection, name: str) -> int:
 def _wiki(store: sqlite3.Connection, name: str) -> int:
     now = db.utcnow()
     return store.execute(
-        "INSERT INTO wiki (name, created_at, updated_at) VALUES (?, ?, ?)",
-        (name, now, now),
+        "INSERT INTO wiki (name, created_at, created_by, updated_at, updated_by)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (name, now, db.AUTHORED_BY, now, db.AUTHORED_BY),
     ).lastrowid
 
 
@@ -57,9 +58,20 @@ def _document(
 ) -> int:
     now = db.utcnow()
     return store.execute(
-        "INSERT INTO document (wiki_id, type_id, title, created_at, updated_at, deleted_at)"
-        " VALUES (?, ?, ?, ?, ?, ?)",
-        (wiki_id, _type_id(store, type_name), title, now, now, now if deleted else None),
+        "INSERT INTO document (wiki_id, type_id, title,"
+        "  created_at, created_by, updated_at, updated_by, deleted_at, deleted_by)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            wiki_id,
+            _type_id(store, type_name),
+            title,
+            now,
+            db.AUTHORED_BY,
+            now,
+            db.AUTHORED_BY,
+            now if deleted else None,
+            db.AUTHORED_BY if deleted else None,
+        ),
     ).lastrowid
 
 
@@ -75,17 +87,17 @@ def _section(
     ts = created_at or db.utcnow()
     store.execute(
         "INSERT INTO document_content_section"
-        " (document_id, position, heading, body, created_at, updated_at)"
-        " VALUES (?, ?, ?, ?, ?, ?)",
-        (document_id, position, heading, body, ts, ts),
+        " (document_id, position, heading, body, created_at, created_by, updated_at, updated_by)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (document_id, position, heading, body, ts, db.AUTHORED_BY, ts, db.AUTHORED_BY),
     )
 
 
 def _edge(store: sqlite3.Connection, source: int, target: int, created_at: str) -> None:
     store.execute(
         "INSERT INTO document_cross_references"
-        " (source_document_id, target_document_id, created_at) VALUES (?, ?, ?)",
-        (source, target, created_at),
+        " (source_document_id, target_document_id, created_at, created_by) VALUES (?, ?, ?, ?)",
+        (source, target, created_at, db.AUTHORED_BY),
     )
 
 
@@ -106,7 +118,10 @@ def world(store):
     ghost = _wiki(store, "Ghost Wiki")
     ghost_doc = _document(store, ghost, "document", "Ghost Notes")
     _section(store, ghost_doc, 1, "should never surface")
-    store.execute("UPDATE wiki SET deleted_at = ? WHERE id = ?", (db.utcnow(), ghost))
+    store.execute(
+        "UPDATE wiki SET deleted_at = ?, deleted_by = 'test' WHERE id = ?",
+        (db.utcnow(), ghost),
+    )
 
     alpha = _doc_id(store, "Alpha Notes")
     progress = _doc_id(store, "Alpha Progress")

@@ -35,33 +35,33 @@ _TRANSIENT_MESSAGES = (
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 _CREATE_DOCUMENT = """
-    INSERT INTO document (wiki_id, type_id, title, created_at, updated_at)
+    INSERT INTO document (wiki_id, type_id, title, created_at, created_by, updated_at, updated_by)
     VALUES (
         :wiki_id,
         (SELECT id FROM document_type WHERE name = 'document'),
-        :title, :now, :now
+        :title, :now, :by, :now, :by
     )
 """
 
 _INSERT_PROGRESS = """
-    INSERT INTO document (wiki_id, type_id, title, created_at, updated_at)
+    INSERT INTO document (wiki_id, type_id, title, created_at, created_by, updated_at, updated_by)
     VALUES (
         :wiki_id,
         (SELECT id FROM document_type WHERE name = 'progress'),
-        :title, :now, :now
+        :title, :now, :by, :now, :by
     )
 """
 
 _INSERT_SECTION = """
     INSERT INTO document_content_section
-        (document_id, position, heading, body, created_at, updated_at)
-    VALUES (:document_id, :position, :heading, :body, :now, :now)
+        (document_id, position, heading, body, created_at, created_by, updated_at, updated_by)
+    VALUES (:document_id, :position, :heading, :body, :now, :by, :now, :by)
 """
 
 _INSERT_EDGE = """
     INSERT OR IGNORE INTO document_cross_references
-        (source_document_id, target_document_id, created_at)
-    VALUES (:source, :target, :now)
+        (source_document_id, target_document_id, created_at, created_by)
+    VALUES (:source, :target, :now, :by)
 """
 
 
@@ -325,8 +325,9 @@ def _resolve_wiki(conn: sqlite3.Connection, name: str) -> int:
 
 def _insert_wiki_row(conn: sqlite3.Connection, name: str, now: str) -> int:
     cursor = conn.execute(
-        "INSERT INTO wiki (name, created_at, updated_at) VALUES (:name, :now, :now)",
-        {"name": name, "now": now},
+        "INSERT INTO wiki (name, created_at, created_by, updated_at, updated_by)"
+        " VALUES (:name, :now, :by, :now, :by)",
+        {"name": name, "now": now, "by": db.AUTHORED_BY},
     )
     return cursor.lastrowid
 
@@ -369,7 +370,12 @@ def _resolve_document(conn, wiki_id: int, request: dict) -> tuple[int, bool]:
         if row is None:
             cursor = conn.execute(
                 _CREATE_DOCUMENT,
-                {"wiki_id": wiki_id, "title": request["title"], "now": db.utcnow()},
+                {
+                    "wiki_id": wiki_id,
+                    "title": request["title"],
+                    "now": db.utcnow(),
+                    "by": db.AUTHORED_BY,
+                },
             )
             return cursor.lastrowid, True
         request["document_id"] = row["id"]
@@ -409,7 +415,10 @@ def _write_sections(conn, document_id: int, sections: list[dict], mode: str, now
                 {"id": document_id, "position": section["position"]},
             )
     for section in sections:
-        conn.execute(_INSERT_SECTION, {"document_id": document_id, **section, "now": now})
+        conn.execute(
+            _INSERT_SECTION,
+            {"document_id": document_id, **section, "now": now, "by": db.AUTHORED_BY},
+        )
 
 
 def _insert_progress(conn, wiki_id: int, request: dict, now: str) -> tuple[int, str]:
@@ -422,10 +431,16 @@ def _insert_progress(conn, wiki_id: int, request: dict, now: str) -> tuple[int, 
         {"wiki": wiki_id},
     ).fetchone()["n"]
     title = f"{count + 1:02d}_{request['progress_slug']}"
-    cursor = conn.execute(_INSERT_PROGRESS, {"wiki_id": wiki_id, "title": title, "now": now})
+    cursor = conn.execute(
+        _INSERT_PROGRESS,
+        {"wiki_id": wiki_id, "title": title, "now": now, "by": db.AUTHORED_BY},
+    )
     progress_id = cursor.lastrowid
     for section in request["progress_sections"]:
-        conn.execute(_INSERT_SECTION, {"document_id": progress_id, **section, "now": now})
+        conn.execute(
+            _INSERT_SECTION,
+            {"document_id": progress_id, **section, "now": now, "by": db.AUTHORED_BY},
+        )
     return progress_id, title
 
 
@@ -442,10 +457,10 @@ def _root_log(conn, now: str) -> int:
         return row["id"]
     cursor = conn.execute(
         """
-        INSERT INTO document (wiki_id, type_id, title, created_at, updated_at)
-        VALUES (NULL, (SELECT id FROM document_type WHERE name = 'log'), 'log', :now, :now)
+        INSERT INTO document (wiki_id, type_id, title, created_at, created_by, updated_at, updated_by)
+        VALUES (NULL, (SELECT id FROM document_type WHERE name = 'log'), 'log', :now, :by, :now, :by)
         """,
-        {"now": now},
+        {"now": now, "by": db.AUTHORED_BY},
     )
     return cursor.lastrowid
 
@@ -458,7 +473,14 @@ def _append_log(conn, log_id: int, entry: str, now: str) -> int:
     position = row["top"] + 1
     conn.execute(
         _INSERT_SECTION,
-        {"document_id": log_id, "position": position, "heading": "", "body": entry, "now": now},
+        {
+            "document_id": log_id,
+            "position": position,
+            "heading": "",
+            "body": entry,
+            "now": now,
+            "by": db.AUTHORED_BY,
+        },
     )
     return position
 
@@ -466,7 +488,10 @@ def _append_log(conn, log_id: int, entry: str, now: str) -> int:
 def _link(conn, source: int, target: int, now: str) -> None:
     if source == target:
         return
-    conn.execute(_INSERT_EDGE, {"source": source, "target": target, "now": now})
+    conn.execute(
+        _INSERT_EDGE,
+        {"source": source, "target": target, "now": now, "by": db.AUTHORED_BY},
+    )
 
 
 def _link_references(conn, document_id: int, wiki_id: int, references: list[dict], now: str) -> int:

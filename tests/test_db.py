@@ -26,9 +26,18 @@ def _insert_section(conn: sqlite3.Connection, body: str, position: int = 3) -> i
     now = db.utcnow()
     return conn.execute(
         "INSERT INTO document_content_section"
-        " (document_id, position, heading, body, created_at, updated_at)"
-        " VALUES (?, ?, ?, ?, ?, ?)",
-        (_document_id(conn, "Alpha Notes"), position, "Inserted", body, now, now),
+        " (document_id, position, heading, body, created_at, created_by, updated_at, updated_by)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            _document_id(conn, "Alpha Notes"),
+            position,
+            "Inserted",
+            body,
+            now,
+            db.AUTHORED_BY,
+            now,
+            db.AUTHORED_BY,
+        ),
     ).lastrowid
 
 
@@ -97,7 +106,7 @@ def test_soft_delete_keeps_fts_row(store):
     section_id = _insert_section(store, "epsilon")
 
     store.execute(
-        "UPDATE document_content_section SET deleted_at = ? WHERE id = ?",
+        "UPDATE document_content_section SET deleted_at = ?, deleted_by = 'test' WHERE id = ?",
         (db.utcnow(), section_id),
     )
 
@@ -115,8 +124,8 @@ def test_foreign_keys_reject_orphans(store):
     with pytest.raises(sqlite3.IntegrityError):
         store.execute(
             "INSERT INTO document_content_section"
-            " (document_id, position, heading, body, created_at, updated_at)"
-            " VALUES (?, 1, 'h', 'b', ?, ?)",
+            " (document_id, position, heading, body, created_at, created_by, updated_at, updated_by)"
+            " VALUES (?, 1, 'h', 'b', ?, 't', ?, 't')",
             (999_999, now, now),
         )
 
@@ -124,7 +133,7 @@ def test_foreign_keys_reject_orphans(store):
     with pytest.raises(sqlite3.IntegrityError):
         store.execute(
             "INSERT INTO document_cross_references"
-            " (source_document_id, target_document_id, created_at) VALUES (?, ?, ?)",
+            " (source_document_id, target_document_id, created_at, created_by) VALUES (?, ?, ?, 't')",
             (document_id, document_id, now),
         )
 
@@ -134,8 +143,9 @@ def test_embedding_columns_are_all_or_nothing(store):
     with pytest.raises(sqlite3.IntegrityError):
         store.execute(
             "INSERT INTO document_content_section"
-            " (document_id, position, heading, body, embedding, created_at, updated_at)"
-            " VALUES (?, 1, 'h', 'b', X'00', ?, ?)",
+            " (document_id, position, heading, body, embedding,"
+            "  created_at, created_by, updated_at, updated_by)"
+            " VALUES (?, 1, 'h', 'b', X'00', ?, 't', ?, 't')",
             (_document_id(store, "Alpha Notes"), now, now),
         )
 

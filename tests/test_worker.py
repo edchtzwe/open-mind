@@ -144,3 +144,55 @@ def test_reconciler_query_returns_pending_live_ids_oldest_first(store, path):
     store.commit()
     assert ids[0] not in worker.pending_section_ids(store)
     assert worker.pending_section_ids(store, limit=1) == worker.pending_section_ids(store)[:1]
+
+
+def test_backfill_refuses_batch_when_embedder_returns_too_few_vectors(
+    store, path, monkeypatch
+):
+    """A short response would silently pair wrong vectors via zip — refuse
+    the batch instead, leaving every row pending."""
+
+    class ShortEmbedder:
+        model_name = "stub-model"
+
+        def embed(self, texts):
+            return [[0.5] * 3]  # one vector for N texts
+
+    monkeypatch.setattr(worker, "configured_embedder", lambda: ShortEmbedder())
+    ids = _pending(store)
+
+    with pytest.raises(RuntimeError, match="refusing the batch"):
+        worker.embed_sections.call_local(ids)
+
+    assert _pending(store) == ids  # nothing written, nothing lost
+
+
+def test_backfill_never_stamps_content_changed_mid_embed(store, path, monkeypatch):
+    """The embed call is the slow part. If an edit lands while the network
+    is in flight, the vector belongs to the old text — the guard must leave
+    the fresh row pending for a new job instead of poisoning it."""
+    ids = _pending(store)
+    edited = {"done": False}
+
+    class RacingEmbedder(StubEmbedder):
+        def embed(self, texts):
+            if not edited["done"]:
+                edited["done"] = True
+                store.execute(
+                    "UPDATE document_content_section SET body = ? WHERE id = ?",
+                    ("fresh content after the race", ids[0]),
+                )
+                store.commit()
+            return super().embed(texts)
+
+    monkeypatch.setattr(worker, "configured_embedder", lambda: RacingEmbedder())
+
+    worker.embed_sections.call_local(ids)
+
+    row = store.execute(
+        "SELECT embedding, body FROM document_content_section WHERE id = ?",
+        (ids[0],),
+    ).fetchone()
+    assert row["embedding"] is None  # stale vector refused
+    assert row["body"] == "fresh content after the race"
+    assert ids[0] in _pending(store)  # still queued for a correct embed

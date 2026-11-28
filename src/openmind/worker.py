@@ -18,6 +18,7 @@ Consumer: `python -m openmind.worker` (one blocking HTTP call per batch).
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -72,25 +73,45 @@ def embed_sections(section_ids: list[int]) -> None:
     if not section_ids:
         return
     embedder = configured_embedder()
+    # One local snapshot BEFORE any network call: each row is written back
+    # only if it is still pending and its content is unchanged (the
+    # `body IS :body` guard), so an edit racing between embed and write can
+    # never have fresh content stamped with a vector of the stale text —
+    # the fresh row just stays pending and gets enqueued again.
     with db.connection() as conn:
-        placeholders = ",".join("?" * len(section_ids))
+        # json_each, not a string-built placeholder list: the id set is
+        # parameterised like every other query (RULES.md A03), however
+        # untrusted the count ever is.
         rows = conn.execute(
-            f"""
+            """
             SELECT id, document_id, position, heading, body
             FROM document_content_section
-            WHERE id IN ({placeholders})
+            WHERE id IN (SELECT value FROM json_each(:ids))
               AND embedding IS NULL AND deleted_at IS NULL
             """,
-            list(section_ids),
+            {"ids": json.dumps(section_ids)},
         ).fetchall()
-        if not rows:
-            return
+    if not rows:
+        return
+    snapshot = {row["id"]: (row["heading"], row["body"]) for row in rows}
 
-        for start in range(0, len(rows), BATCH):
-            batch = rows[start : start + BATCH]
-            texts = [section_text(row["heading"], row["body"]) for row in batch]
-            vectors = embedder.embed(texts)
-            _store(conn, embedder.model_name, batch, texts, vectors)
+    # The embed call happens OUTSIDE every transaction and outside the
+    # connection above: a slow or dead provider must never hold SQLite's
+    # writer lock, and a failure here leaves nothing half-written — the task
+    # retries (or the reconciler re-enqueues) with the rows still pending.
+    for start in range(0, len(rows), BATCH):
+        batch = rows[start : start + BATCH]
+        texts = [section_text(row["heading"], row["body"]) for row in batch]
+        vectors = embedder.embed(texts)
+        if len(vectors) != len(batch):
+            # Fewer vectors than texts would silently pair the wrong vector
+            # with a row via zip. Refuse the batch; rows stay pending.
+            raise RuntimeError(
+                f"embedder returned {len(vectors)} vector(s) for "
+                f"{len(batch)} text(s) — refusing the batch, rows stay pending"
+            )
+        with db.connection() as conn:
+            _store(conn, embedder.model_name, batch, texts, vectors, snapshot)
 
 
 def _store(
@@ -99,9 +120,11 @@ def _store(
     rows: list[Any],
     texts: list[str],
     vectors: list[list[float]],
+    snapshot: dict[int, tuple[str, str]],
 ) -> None:
-    """Write the vectors. One transaction for the batch, `embedding IS NULL`
-    still in the WHERE: a row re-queued twice can only be won once.
+    """Write the vectors. One transaction for the batch; a row is won only
+    if it is still pending, still live, and byte-identical to the snapshot
+    the vector was computed from — otherwise it stays NULL for a fresh job.
 
     `updated_at`/`updated_by` move with the vector on purpose — the doc-edit
     timestamp doubles as the embed audit trail: a fault window in the logs
@@ -112,12 +135,14 @@ def _store(
     conn.execute("BEGIN IMMEDIATE")
     try:
         for row, text, vector in zip(rows, texts, vectors):
+            snapshot_heading, snapshot_body = snapshot[row["id"]]
             conn.execute(
                 """
                 UPDATE document_content_section
                 SET embedding = :embedding, embedding_model = :model,
                     embedding_text = :text, updated_at = :now, updated_by = :by
                 WHERE id = :id AND embedding IS NULL AND deleted_at IS NULL
+                  AND heading IS :snap_heading AND body IS :snap_body
                 """,
                 {
                     "embedding": vector_to_blob(vector),
@@ -126,6 +151,8 @@ def _store(
                     "now": now,
                     "by": db.WORKER,
                     "id": row["id"],
+                    "snap_heading": snapshot_heading,
+                    "snap_body": snapshot_body,
                 },
             )
         conn.execute("COMMIT")

@@ -24,10 +24,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Block draft PRs
+      - name: Draft PR — tests intentionally not run (not a test failure)
         if: github.event_name == 'pull_request' && github.event.pull_request.draft == true
         run: |
-          echo 'Draft PR: mark ready for review to run the full test suite.'
+          echo "::error title=Draft PR — intended behavior, no tests ran::This failure is NOT a test failure. Draft PRs intentionally skip the suite because a skipped required check would count as passing. Mark the PR ready for review to run the full suite against GitHub's proposed merge."
           exit 1
 
       - uses: actions/checkout@v4

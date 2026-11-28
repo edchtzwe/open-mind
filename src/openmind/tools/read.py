@@ -14,11 +14,12 @@ actually needed.
 from __future__ import annotations
 
 import re
+import logging
 import sqlite3
 from collections import defaultdict, deque
 from typing import Any
 
-from openmind import db
+from openmind import db, telemetry
 from openmind.embedding import (
     EmbeddingUnhealthy,
     blob_to_vector,
@@ -355,10 +356,10 @@ def semantic_search(query: str, wiki: str | None = None) -> list[dict[str, Any]]
     if not rows:
         return []
 
-    query_vector = configured_embedder().embed([query.strip()])[0]
+    query_vector = _embed_query(query.strip())
     scored: list[tuple[float, sqlite3.Row]] = []
     for row in rows:
-        vector = blob_to_vector(row["embedding"])
+        vector = _row_vector(row)
         if len(vector) != len(query_vector):
             # A dimension mismatch means the stored vector came from a model
             # with a different width than the configured one under the same
@@ -384,6 +385,49 @@ def semantic_search(query: str, wiki: str | None = None) -> list[dict[str, Any]]
         }
         for score, row in scored
     ]
+
+
+def _embed_query(text: str) -> list[float]:
+    """Embed the search query, translating provider failures into our
+    vocabulary. Nothing is swallowed: the original error is chained and
+    attached to the log line, so a 401 or a dead network reads as
+    `embedding the query failed: ...` instead of an openai stack trace.
+    """
+    try:
+        return configured_embedder().embed([text])[0]
+    except Exception as exc:  # noqa: BLE001 — translated, logged, re-raised
+        telemetry.log_event(
+            "semantic_search.embed_failed",
+            level=logging.WARNING,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
+        raise RuntimeError(
+            f"embedding the query failed ({type(exc).__name__}: {exc}) — "
+            "check [embedding] openrouter_model, your OPENROUTER_API_KEY, "
+            "and network access"
+        ) from exc
+
+
+def _row_vector(row: sqlite3.Row) -> list[float]:
+    """Decode one stored vector, translating a corrupt blob into the same
+    loud vocabulary. The CHECK constraint guarantees all-or-nothing columns,
+    not blob validity — a truncated vector is `broken` the hard way.
+    """
+    try:
+        return blob_to_vector(row["embedding"])
+    except Exception as exc:  # noqa: BLE001 — translated, logged, re-raised
+        telemetry.log_event(
+            "semantic_search.corrupt_vector",
+            level=logging.WARNING,
+            error_type=type(exc).__name__,
+            section_id=row["id"],
+        )
+        raise EmbeddingUnhealthy(
+            f"section {row['id']} carries an unreadable embedding blob "
+            f"({type(exc).__name__}); semantic search is unsafe — "
+            "reconcile with your user (doctor)"
+        ) from exc
 
 
 def _cosine(a: list[float], b: list[float]) -> float:

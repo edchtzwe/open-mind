@@ -124,3 +124,39 @@ def test_health_counts_drive_the_gate(vectors, path):
     assert health["stale"] == 0
     assert health["broken"] == 0
     assert health["model"] == embedding.configured_model_name()
+
+
+class ExplodingEmbedder:
+    """Provider failure: network down, 401, model gone — any exception the
+    SDK could raise."""
+
+    model_name = "stub-model"
+
+    def embed(self, texts):
+        raise ConnectionError("connection refused (stub)")
+
+
+def test_provider_failure_is_translated_not_leaked(vectors, path, monkeypatch):
+    """Raw SDK stack traces are our problem to translate: the caller gets
+    our vocabulary, the original error stays chained and logged."""
+    monkeypatch.setattr(read_tools, "configured_embedder", lambda: ExplodingEmbedder())
+
+    with pytest.raises(RuntimeError, match="embedding the query failed") as excinfo:
+        read_tools.semantic_search("kestrel")
+    assert isinstance(excinfo.value.__cause__, ConnectionError)
+    assert "connection refused" in str(excinfo.value)
+
+
+def test_corrupt_vector_blob_is_unhealthy_not_a_crash(vectors, path):
+    """A blob the array module cannot decode passes the health CHECK but
+    fails at read time — translated into the doctor's vocabulary."""
+    store = vectors
+    section_id = _section_id(store, "Alpha Notes", 1)
+    store.execute(
+        "UPDATE document_content_section SET embedding = ? WHERE id = ?",
+        (b"\x00\x00", section_id),  # not a multiple of 4: undecodable
+    )
+    store.commit()
+
+    with pytest.raises(embedding.EmbeddingUnhealthy, match="unreadable"):
+        read_tools.semantic_search("kestrel")
